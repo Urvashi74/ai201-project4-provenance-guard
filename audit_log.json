@@ -1,0 +1,148 @@
+[
+  {
+    "event": "classification",
+    "content_id": "6eb70a25-aaae-4850-b51b-21ca71841977",
+    "creator_id": "creator-anna",
+    "timestamp": "2026-07-03T05:46:13.608272Z",
+    "text_preview": "ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too\u2026",
+    "attribution": "Human-written",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.1233,
+      "llm_score": 0.4,
+      "combined_score": 0.2893,
+      "confidence": 0.3048
+    },
+    "status": "classified"
+  },
+  {
+    "event": "classification",
+    "content_id": "9b3cb643-d597-48d0-b736-f3dde8e34f5b",
+    "creator_id": "creator-bob",
+    "timestamp": "2026-07-03T05:46:14.814477Z",
+    "text_preview": "Furthermore, it is important to note that artificial intelligence plays a crucial role in todays fast-paced world. In co\u2026",
+    "attribution": "AI-generated",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.7044,
+      "llm_score": 0.8,
+      "combined_score": 0.7618,
+      "confidence": 0.4735
+    },
+    "status": "under_review",
+    "appeal_id": "4074ebe6-1d29-4b7a-afe6-4e947c0752a9"
+  },
+  {
+    "event": "classification",
+    "content_id": "25a82600-4668-4296-a699-aceb4c72b7a9",
+    "creator_id": "creator-chen",
+    "timestamp": "2026-07-03T05:46:16.071879Z",
+    "text_preview": "The relationship between monetary policy and asset price inflation has been extensively studied in the literature. Centr\u2026",
+    "attribution": "AI-generated",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.3658,
+      "llm_score": 0.6,
+      "combined_score": 0.5063,
+      "confidence": 0.0096
+    },
+    "status": "classified"
+  },
+  {
+    "event": "appeal",
+    "appeal_id": "4074ebe6-1d29-4b7a-afe6-4e947c0752a9",
+    "content_id": "9b3cb643-d597-48d0-b736-f3dde8e34f5b",
+    "timestamp": "2026-07-03T05:46:17.269987Z",
+    "original_attribution": "AI-generated",
+    "original_signals": {
+      "linguistic_score": 0.7044,
+      "llm_score": 0.8,
+      "combined_score": 0.7618,
+      "confidence": 0.4735
+    },
+    "original_label_variant": "uncertain",
+    "creator_reasoning": "I wrote this myself as a summary paragraph for a policy brief. The formal register and transition phrases are standard in my field.",
+    "status": "pending_review"
+  },
+  {
+    "event": "classification",
+    "content_id": "62a84d25-f55c-48e7-8748-2bae92315d20",
+    "creator_id": "test-ai",
+    "timestamp": "2026-07-03T05:48:18.284818Z",
+    "text_preview": "Artificial intelligence represents a transformative paradigm shift in modern society. It is important to note that while\u2026",
+    "attribution": "AI-generated",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.4152,
+      "llm_score": 0.7,
+      "combined_score": 0.5861,
+      "confidence": 0.1232
+    },
+    "status": "classified"
+  },
+  {
+    "event": "classification",
+    "content_id": "9d5edcfa-7cda-4d27-a583-64de2e8907a4",
+    "creator_id": "test-human",
+    "timestamp": "2026-07-03T05:48:19.540761Z",
+    "text_preview": "ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too\u2026",
+    "attribution": "Human-written",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.1233,
+      "llm_score": 0.4,
+      "combined_score": 0.2893,
+      "confidence": 0.3048
+    },
+    "status": "classified"
+  },
+  {
+    "event": "classification",
+    "content_id": "bcb12a5e-23b8-431b-8686-390f8b29377e",
+    "creator_id": "test-academic",
+    "timestamp": "2026-07-03T05:48:20.988451Z",
+    "text_preview": "The relationship between monetary policy and asset price inflation has been extensively studied in the literature. Centr\u2026",
+    "attribution": "AI-generated",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.3658,
+      "llm_score": 0.6,
+      "combined_score": 0.5063,
+      "confidence": 0.0096
+    },
+    "status": "under_review",
+    "appeal_id": "1d0cc5f8-a271-4fbe-b296-3218eb3611e9"
+  },
+  {
+    "event": "classification",
+    "content_id": "712f76cd-1a83-4ed4-9448-62234b64e4e9",
+    "creator_id": "test-hybrid",
+    "timestamp": "2026-07-03T05:48:22.198257Z",
+    "text_preview": "I have been thinking a lot about remote work lately. There are genuine tradeoffs \u2014 flexibility and no commute on one sid\u2026",
+    "attribution": "Human-written",
+    "label_variant": "uncertain",
+    "signals": {
+      "linguistic_score": 0.2741,
+      "llm_score": 0.4,
+      "combined_score": 0.3496,
+      "confidence": 0.2629
+    },
+    "status": "classified"
+  },
+  {
+    "event": "appeal",
+    "appeal_id": "1d0cc5f8-a271-4fbe-b296-3218eb3611e9",
+    "content_id": "bcb12a5e-23b8-431b-8686-390f8b29377e",
+    "timestamp": "2026-07-03T05:48:23.561174Z",
+    "original_attribution": "AI-generated",
+    "original_signals": {
+      "linguistic_score": 0.3658,
+      "llm_score": 0.6,
+      "combined_score": 0.5063,
+      "confidence": 0.0096
+    },
+    "original_label_variant": "uncertain",
+    "creator_reasoning": "This is an excerpt from my economics dissertation written over two years. The formal academic register is required by my institution. I have never used AI tools in my research.",
+    "status": "pending_review"
+  }
+]

@@ -7,112 +7,159 @@ been misclassified.
 
 ---
 
-## How a Piece of Text Becomes a Label
+## Architecture Overview
 
-This is the exact path a submission takes through the system, component by component.
+A submission travels through eight components in sequence before a label is returned.
 
-**1. Rate Limiter**
-Before any analysis runs, Flask-Limiter checks the requester's IP address against
-per-IP counters stored in memory. If the caller has sent more than 10 requests in
-the last minute (or 50 in the last hour), the request is rejected with HTTP 429 and
-never reaches the detection pipeline. This gate protects the Groq API from abuse and
-keeps latency predictable for legitimate creators.
+**1. Rate Limiter** — Flask-Limiter checks the caller's IP against per-IP counters
+in memory. Requests over 10/min or 50/hr are rejected with HTTP 429 before any
+analysis runs.
 
-**2. Input Validator**
-The submission handler reads the JSON body and enforces two rules: the `content`
-field must be present, and the text must be between 50 and 10,000 characters. Texts
-shorter than 50 characters give the linguistic signal too little data to work with;
-texts longer than 10,000 characters would push the Groq prompt past its useful
-context window. Failures return HTTP 400 with a plain-English message.
+**2. Input Validator** — Enforces `text` and `creator_id` fields, and a 50–10,000
+character range. Below 50 characters the linguistic signal lacks enough sentences
+to compute meaningful statistics.
 
-**3. Signal 1 — Linguistic / Statistical Analyzer**
-The first signal never calls an external API. It runs four statistical measurements
-directly on the submitted text:
+**3. Signal 1: Linguistic Analyzer** — Runs four statistical measurements on the
+raw text (sentence-length burstiness, vocabulary richness, AI transition-phrase
+density, average word length) and returns a `linguistic_score` in [0, 1].
 
-- **Sentence-length burstiness**: Humans naturally mix short punchy sentences with
-  long complex ones (high coefficient of variation). AI-generated text tends to be
-  metronomic — sentences cluster around a consistent length. A low CV score raises
-  the AI-probability estimate.
+**4. Signal 2: LLM Classifier** — Calls Groq (`llama-3.1-8b-instant`) with a
+forensic-linguist prompt. Returns an `llm_score` in [0, 1] and a list of observed
+signals. Falls back to 0.5 if the API call fails.
 
-- **Vocabulary richness (type-token ratio)**: The ratio of unique words to total
-  words, adjusted logarithmically for text length. AI text repeats concepts and
-  relies on a narrower effective vocabulary than human writing at the same length.
-  A low TTR raises the AI-probability estimate.
+**5. Confidence Scorer** — Combines both scores into `combined_score` (weighted
+average, LLM 60%) and `confidence` (penalizes inter-signal disagreement).
 
-- **AI transition-phrase density**: A curated list of phrases that LLMs
-  statistically overuse — "furthermore", "it is worth noting", "delve into",
-  "plays a crucial role", and ~20 others. Each hit increments a counter; the
-  counter is normalized to a 0–1 score. Multiple hits strongly raise the estimate.
+**6. Label Generator** — Maps `combined_score` and `confidence` to one of three
+transparency label variants using a conservative double-gate threshold.
 
-- **Average word length**: AI output skews toward formal, polysyllabic diction.
-  A higher average word length nudges the estimate upward.
+**7. Audit Logger** — Appends a structured JSON record to `audit_log.json`
+containing every field needed for human moderator review.
 
-The four sub-scores are combined with fixed weights (burstiness 35%, TTR 30%,
-transitions 25%, word length 10%) into a single `linguistic_score` in [0, 1].
+**8. Response** — Returns the full JSON object including `content_id`, `attribution`,
+`confidence`, `transparency_label`, and per-signal detail.
 
-**4. Signal 2 — LLM Classifier (Groq)**
-The second signal calls the Groq API with `llama-3.1-8b-instant`. A structured
-prompt asks the model to act as a forensic linguist and return a JSON object with an
-`ai_probability` float and the key signals it observed. The model runs at temperature
-0.1 to minimize stochastic variance. If the API call fails, this signal falls back
-gracefully to 0.5 (maximum uncertainty) and logs the error — the endpoint never
-returns a 500 to the caller.
+---
 
-**5. Confidence Scorer**
-The two signal scores are fed into the confidence scorer, which does two things:
+## Detection Signals
 
-First, it computes a `combined_score` as a weighted average:
+### Signal 1: Linguistic / Statistical Analysis
+
+**What it measures:** Four surface-level statistical properties, combined with fixed
+weights: sentence-length coefficient of variation (35%), type-token ratio adjusted
+for text length (30%), density of AI-overused transition phrases (25%), and average
+word length (10%).
+
+**Why it was chosen:** It requires no external API call, runs deterministically, and
+captures patterns that emerge from how language models are trained. Models optimize
+for readability, which produces metronomic sentence lengths and repetitive vocabulary.
+The transition-phrase list targets direct training artifacts — phrases that appear
+disproportionately in model output because they appeared in high-quality training
+essays.
+
+**What it misses:**
+- Academic and formal human writing — a PhD student's literature review uses
+  transition phrases and consistent sentence lengths by convention, scoring
+  indistinguishably from AI output on all four features.
+- Style mimicry — an AI prompted to write like a casual diary entry can defeat
+  every sub-feature.
+- Genre effects — poetry with deliberate repetition (anaphora) has very low TTR
+  for intentional artistic reasons.
+- Short texts — under ~80 words, CV and TTR are statistically unreliable.
+
+---
+
+### Signal 2: LLM Classifier (Groq / llama-3.1-8b-instant)
+
+**What it measures:** The semantic and stylistic texture of the text as judged by a
+language model prompted to act as a forensic linguist. It evaluates personal voice,
+lived-experience specificity, structural formulaism, and generic vs. idiosyncratic
+phrasing.
+
+**Why it was chosen:** Statistics are blind to meaning. The LLM can detect that
+"my mother used to leave folded notes inside my lunch box, always the same blue ink"
+is the kind of concrete detail only a human with that specific memory would include —
+something no surface measurement captures.
+
+**What it misses:**
+- AI text prompted toward specificity — an AI instructed to include concrete sensory
+  details produces text that looks human to a classifier. This signal will degrade
+  as prompting techniques improve.
+- Deliberately generic human writing — brand copywriters, technical writers, and
+  form-letter authors strip out personal voice intentionally. They score as AI.
+- The classifier's own training bias — we're asking an LLM to detect LLM output.
+  It may miss patterns from models trained after its knowledge cutoff, and may
+  penalize writing styles underrepresented in its training data (non-Western
+  narrative conventions, oral storytelling traditions).
+- Temperature variance — two calls with the same text can return scores differing
+  by ~0.05–0.10 at temperature 0.1.
+
+---
+
+## Confidence Scoring
+
+Confidence is not the same as the AI-probability estimate. It measures how *certain*
+the system is, not just which direction the evidence points.
 
 ```
-combined = 0.40 × linguistic_score + 0.60 × llm_score
+combined_score = 0.40 × linguistic_score + 0.60 × llm_score
+confidence     = |combined_score − 0.5| × 2 × (1 − |linguistic_score − llm_score|)
 ```
 
-The LLM signal is weighted higher because it reads full semantic context, not just
-surface statistics.
+The first factor measures how far the combined score is from the center of the
+scale (0.5 = maximum uncertainty). The second factor penalizes inter-signal
+disagreement: if one signal says 0.8 and the other says 0.2, confidence collapses
+toward zero even though the average is 0.5. This prevents a split verdict from
+producing a falsely definitive label.
 
-Second, it computes a `confidence` value:
+**Validation — two submissions with meaningfully different confidence scores:**
 
+*Submission A: Casual ramen review (clearly human-written)*
 ```
-confidence = |combined − 0.5| × 2 × (1 − |linguistic − llm|)
+Text: "ok so i finally tried that new ramen place downtown and honestly?
+underwhelming. the broth was fine but they put WAY too much sodium in it..."
+
+linguistic_score : 0.123   (zero phrase hits, short words, varied sentence lengths)
+llm_score        : 0.200   (casual register, specific complaint, no formulaic structure)
+combined_score   : 0.169
+confidence       : 0.611
+label            : uncertain (combined ≤ 0.30 ✓ but confidence just under 0.65 threshold)
 ```
 
-The first factor measures how far the combined score is from center (0.5 = pure
-uncertainty). The second factor penalizes disagreement between the two signals. If
-one signal says 0.8 and the other says 0.2, confidence collapses toward zero even
-though the average is 0.5 — the system is honest about its uncertainty.
+*Submission B: Borderline formal academic text*
+```
+Text: "The relationship between monetary policy and asset price inflation has been
+extensively studied in the literature. Central banks face a fundamental tension..."
 
-A `combined_score` of 0.51 produces a confidence near 0.02. A `combined_score` of
-0.95 with both signals in strong agreement produces a confidence near 0.90. These
-two cases produce meaningfully different labels.
+linguistic_score : 0.366   (moderate — no phrase hits but formal word length)
+llm_score        : 0.800   (LLM flags formulaic structure, no personal voice)
+combined_score   : 0.627
+confidence       : 0.143   (signals disagree by 0.43 → disagreement penalty fires)
+label            : uncertain
+```
 
-**6. Label Generator**
-Takes `combined_score` and `confidence` and selects one of three transparency label
-variants. Thresholds are intentionally conservative: high-confidence labels require
-both a strong score *and* high inter-signal agreement. This reflects the spec's
-asymmetry: mislabeling a human creator's work as AI is worse than missing an AI
-piece, so the system defaults to "uncertain" in ambiguous cases.
-
-**7. Audit Logger**
-Every classification is immediately appended to `audit_log.json` as a structured
-JSON record: content ID, timestamp, attribution, both signal scores, combined score,
-confidence, label variant, and status. Only the first 120 characters of the text are
-stored as a preview. The log is also updated on appeal: the original entry's status
-changes to `under_review`, and a second record captures the creator's reasoning.
-
-**8. Response**
-The endpoint returns a single JSON object: `content_id`, `timestamp`, `attribution`,
-`ai_probability`, `confidence_score`, `transparency_label` (variant + full text), and
-a `signals` object with both raw scores and the features each detector found.
+Submission A (confidence 0.611) and Submission B (confidence 0.143) have noticeably
+different confidence scores despite both returning `uncertain`. Submission A is close
+to the human threshold; Submission B has nearly no certainty because the two signals
+are far apart. A `combined_score` of 0.51 would produce confidence ~0.02.
 
 ---
 
 ## Transparency Label Variants
 
-These are the exact verbatim strings the system surfaces to users.
+These are the exact strings returned in `transparency_label.text`.
+
+**Thresholds:**
+- `high_confidence_ai` → `combined_score >= 0.70` AND `confidence >= 0.65`
+- `high_confidence_human` → `combined_score <= 0.30` AND `confidence >= 0.65`
+- `uncertain` → everything else (including high combined scores with low confidence)
+
+Both gates must pass simultaneously. A score of 0.90 with confidence of 0.40
+(because signals disagreed) still returns `uncertain`.
+
+---
 
 ### `high_confidence_ai`
-
-Triggered when `combined_score >= 0.70` AND `confidence >= 0.65`.
 
 > AI-Generated Content: Our analysis strongly indicates this content was produced by
 > an AI writing system. Multiple signals — including structural patterns, vocabulary
@@ -120,19 +167,18 @@ Triggered when `combined_score >= 0.70` AND `confidence >= 0.65`.
 > yourself and believe this assessment is wrong, you can submit an appeal and a human
 > moderator will review your case.
 
-### `high_confidence_human`
+---
 
-Triggered when `combined_score <= 0.30` AND `confidence >= 0.65`.
+### `high_confidence_human`
 
 > Human-Created Content: Our analysis strongly indicates this content was written by
 > a human. The writing shows characteristics consistent with authentic human
 > authorship: varied sentence rhythm, personal voice, and idiosyncratic word choices.
 > No significant AI-generation signals were detected.
 
-### `uncertain`
+---
 
-Triggered in all other cases, including when signals disagree regardless of the
-combined score.
+### `uncertain`
 
 > Origin Uncertain: We could not determine with confidence whether this content was
 > written by a human or generated by AI. It may be entirely human-written,
@@ -144,83 +190,26 @@ combined score.
 
 ## Rate Limiting
 
-Rate limiting is applied per IP address using Flask-Limiter with in-memory storage.
+Applied per IP address using Flask-Limiter with in-memory storage.
 
 | Endpoint | Limit | Reasoning |
 |---|---|---|
-| `POST /submit` | 10/min, 50/hr, 200/day | A legitimate creator won't submit 10 pieces in a minute. The burst limit allows rapid draft iteration; the hourly/daily caps prevent sustained API abuse. |
-| `POST /appeal/<id>` | 5/hr | Appeals require human reasoning and are inherently low-frequency. This cap prevents appeal flooding without burdening creators contesting several pieces. |
+| `POST /submit` | 10/min, 50/hr, 200/day | A creator submitting their own work won't need 10 submissions in a minute. The burst window allows rapid draft iteration; the hourly and daily caps prevent sustained API abuse without burdening real users. |
+| `POST /appeal/<id>` | 5/hr | Appeals require a human to write a reasoned explanation. Five per hour is generous for any legitimate user; it stops automated appeal flooding. |
 
-If a limit is exceeded, the API returns HTTP 429 with a JSON error body. The limit
-rationale deliberately accepts the trade-off that a single user behind a shared IP
-(e.g., a school network) may hit limits sooner — this is acceptable given that the
-primary threat is automated scraping, not human creators.
-
----
-
-## Multi-Signal Detection Pipeline
-
-Two independent signals are computed and combined.
-
-### Signal 1: Linguistic / Statistical Analysis
-- **Input**: raw text
-- **Output**: `linguistic_score` in [0, 1] (0 = human, 1 = AI)
-- **Sub-features**: sentence-length CV, type-token ratio, AI transition phrase count, average word length
-- **No external calls** — deterministic and fast
-
-### Signal 2: Groq LLM Classifier
-- **Input**: raw text (up to 2,500 chars)
-- **Output**: `llm_score` in [0, 1] + list of observed key signals
-- **Model**: `llama-3.1-8b-instant` via Groq API, temperature 0.1
-- **Fallback**: returns 0.5 if API call fails
-
-### Combination
-```
-combined_score = 0.40 x linguistic_score + 0.60 x llm_score
-confidence     = |combined_score - 0.5| x 2 x (1 - |linguistic_score - llm_score|)
-```
-
----
-
-## Confidence Scoring
-
-Confidence is not the same as the AI-probability estimate. It measures *certainty*.
-
-| Scenario | combined_score | Disagreement | confidence | Label |
-|---|---|---|---|---|
-| Both signals weakly agree: AI | 0.51 | 0.02 | ~0.02 | `uncertain` |
-| Signals split | 0.50 | 0.80 | ~0.00 | `uncertain` |
-| Both signals moderately agree: AI | 0.72 | 0.10 | ~0.62 | `high_confidence_ai` |
-| Both signals strongly agree: AI | 0.92 | 0.05 | ~0.85 | `high_confidence_ai` |
-| Both signals strongly agree: human | 0.08 | 0.05 | ~0.85 | `high_confidence_human` |
-
----
-
-## Appeals Workflow
-
-Creators who dispute a classification send `POST /appeal/<content_id>` with a JSON
-body containing a `reasoning` field (minimum 20 characters).
-
-The system:
-1. Looks up the original classification by `content_id` in the audit log
-2. Returns HTTP 404 if no classification exists, HTTP 409 if an appeal is already pending
-3. Updates the original log entry's `status` from `classified` to `under_review`
-4. Appends a new `appeal` event to the audit log containing: `appeal_id`, `content_id`,
-   timestamp, original attribution, original confidence, and the creator's verbatim reasoning
-5. Returns a confirmation with the appeal ID and original classification details
-
-The appeal is logged alongside the original decision. A human moderator reviews both
-together. The system does not auto-resolve appeals.
+Exceeding a limit returns HTTP 429. The per-IP model accepts one trade-off: users
+behind a shared IP (e.g., a university network) may hit limits sooner. This is
+acceptable given the primary threat is automated scraping, not human creators.
 
 ---
 
 ## Audit Log
 
-Every attribution decision and every appeal is written to `audit_log.json`. The log
-is append-only at runtime; entries are never deleted or overwritten (status fields on
-existing entries are mutated on appeal).
+Every classification decision and every appeal is written to `audit_log.json`.
+Classification entries are never deleted; status fields are mutated in-place when
+an appeal is filed, and a second `appeal` event is appended.
 
-Retrieve the log: `GET /log?limit=50&offset=0&event=classification`
+Retrieve: `GET /log`
 
 ### Sample entries (3 events)
 
@@ -228,50 +217,150 @@ Retrieve the log: `GET /log?limit=50&offset=0&event=classification`
 [
   {
     "event": "classification",
-    "content_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "timestamp": "2026-07-01T14:22:10Z",
-    "content_preview": "The morning light crept through the curtains like it owed me something. I hadn't slept...",
+    "content_id": "6eb70a25-aaae-4850-b51b-21ca71841977",
+    "creator_id": "creator-anna",
+    "timestamp": "2026-07-03T05:46:13.608272Z",
+    "text_preview": "ok so i finally tried that new ramen place downtown and honestly?...",
     "attribution": "Human-written",
-    "ai_probability": 0.21,
-    "confidence_score": 0.74,
-    "label_variant": "high_confidence_human",
+    "label_variant": "uncertain",
     "signals": {
-      "linguistic_score": 0.18,
-      "llm_score": 0.23
+      "linguistic_score": 0.1233,
+      "llm_score": 0.4,
+      "combined_score": 0.2893,
+      "confidence": 0.3048
     },
     "status": "classified"
   },
   {
     "event": "classification",
-    "content_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-    "timestamp": "2026-07-01T14:35:44Z",
-    "content_preview": "In conclusion, it is important to note that artificial intelligence plays a crucial role in...",
+    "content_id": "9b3cb643-d597-48d0-b736-f3dde8e34f5b",
+    "creator_id": "creator-bob",
+    "timestamp": "2026-07-03T05:46:14.814477Z",
+    "text_preview": "Furthermore, it is important to note that AI plays a crucial role...",
     "attribution": "AI-generated",
-    "ai_probability": 0.87,
-    "confidence_score": 0.81,
-    "label_variant": "high_confidence_ai",
+    "label_variant": "uncertain",
     "signals": {
-      "linguistic_score": 0.79,
-      "llm_score": 0.91
+      "linguistic_score": 0.7044,
+      "llm_score": 0.8,
+      "combined_score": 0.7618,
+      "confidence": 0.4735
     },
-    "status": "under_review"
+    "status": "under_review",
+    "appeal_id": "4074ebe6-1d29-4b7a-afe6-4e947c0752a9"
   },
   {
     "event": "appeal",
-    "appeal_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-    "content_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-    "timestamp": "2026-07-01T14:41:02Z",
+    "appeal_id": "4074ebe6-1d29-4b7a-afe6-4e947c0752a9",
+    "content_id": "9b3cb643-d597-48d0-b736-f3dde8e34f5b",
+    "timestamp": "2026-07-03T05:46:17.269987Z",
     "original_attribution": "AI-generated",
-    "original_confidence": 0.81,
-    "original_label_variant": "high_confidence_ai",
-    "creator_reasoning": "I wrote this myself as part of my thesis on urban planning. The formal tone is intentional — it's an academic excerpt, not creative writing.",
+    "original_signals": {
+      "linguistic_score": 0.7044,
+      "llm_score": 0.8,
+      "combined_score": 0.7618,
+      "confidence": 0.4735
+    },
+    "original_label_variant": "uncertain",
+    "creator_reasoning": "I wrote this myself as a summary paragraph for a policy brief. The formal register and transition phrases are standard in my field.",
     "status": "pending_review"
   }
 ]
 ```
 
-After the appeal in entry 3, the classification entry for `b2c3d4e5...` has its
-`status` field updated to `"under_review"` in the log.
+---
+
+## Appeals Workflow
+
+Any creator with a `content_id` from a `POST /submit` response can file an appeal.
+
+**Request:** `POST /appeal/<content_id>` with body `{ "creator_reasoning": "..." }`
+(minimum 20 characters).
+
+**What happens:**
+1. System looks up the `content_id` in `audit_log.json` — returns 404 if not found
+2. Returns 409 if an appeal is already pending
+3. Mutates the original classification entry: `status` → `"under_review"`, adds `appeal_id`
+4. Appends a new `appeal` event with the creator's verbatim reasoning and the original signal scores
+5. Returns a confirmation with `appeal_id` and the original classification details
+
+A human moderator reviews both records side by side via `GET /log` or
+`GET /status/<content_id>`. The system does not auto-resolve appeals.
+
+---
+
+## Known Limitations
+
+**Non-native English writers using learned formal register.** Writers whose first
+language is not English are often taught explicit structural patterns in ESL
+instruction — topic sentences, numbered transitions ("First... Second... In
+conclusion..."), and consistent paragraph structure. These patterns score identically
+to AI output on Signal 1 (transition-phrase density, consistent sentence lengths,
+formal vocabulary). Signal 2 may also penalize the absence of idiomatic English
+constructions. This population is systematically disadvantaged by both signals and
+will receive `uncertain` or occasionally `high_confidence_ai` labels even for
+entirely human-written work. Their best recourse is the appeals endpoint, where a
+human moderator can recognize the register mismatch.
+
+**Poets using deliberate anaphora and repetition.** A human poet writing in the
+tradition of Walt Whitman — heavy anaphoric repetition, simple vocabulary, structurally
+repeated clauses — will produce very low TTR scores and uniform sentence lengths.
+Signal 1 will score this as AI-like. Signal 2 may partially compensate if it detects
+the personal voice, but the combined result will typically land in `uncertain`.
+
+---
+
+## Spec Reflection
+
+**One way the spec helped:** The explicit asymmetry requirement — "false positives
+(labeling human work as AI) are worse than false negatives" — directly shaped the
+confidence threshold decision. Without that framing, the natural instinct would have
+been to set the threshold at 0.50 (majority vote). The spec's asymmetry requirement
+pushed the threshold to 0.65 confidence *and* required a strong combined score
+simultaneously. This double-gate is what prevents the academic-writing false positive
+from firing a `high_confidence_ai` label even when both signals agree the text looks
+AI-like.
+
+**One way implementation diverged from the spec:** The spec described attribution as
+a binary result. The implementation returns both `attribution` (a plain-English
+`"Human-written"` or `"AI-generated"` string) *and* `ai_probability` (the raw
+continuous combined score) in the response. A binary label alone would have been
+misleading — a piece with combined_score 0.51 and confidence 0.02 produces
+`"AI-generated"` but the system has almost no certainty. Surfacing the continuous
+score allows callers to display more nuanced UI (e.g., a confidence bar) and gives
+moderators a clearer picture than the binary string alone.
+
+---
+
+## AI Usage
+
+**Instance 1 — Signal 1 function and Flask skeleton (M3)**
+
+Directed the AI tool to generate the complete `linguistic_signal()` function and
+the `POST /submit` endpoint skeleton, providing the Signal 1 specification from
+`planning.md` (the four sub-features, their weights, and the output format) and the
+Architecture Flow 1 diagram as context.
+
+*What was revised:* The initial burstiness anchor was set at CV > 0.40 as the
+human-writing threshold. After spot-checking the function against three test inputs,
+the human diary-entry sample had CV = 0.63 (correctly identified as varied) but the
+ramen-review sample had CV = 0.03 (only two sentences — too short for the metric to
+be reliable). The anchor was adjusted to 0.55 and the sentence-count guard was added
+after this test revealed the short-text edge case.
+
+**Instance 2 — LLM classifier prompt (M4)**
+
+Directed the AI tool to write the Groq prompt for `llm_signal()`, providing the
+Signal 2 specification and the uncertainty representation section from `planning.md`.
+
+*What was overridden:* The initial prompt produced a score of 0.40 for a clearly
+human casual ramen review and called it "formulaic structure" — the model was treating
+informal grammar and missing punctuation as AI signals rather than human ones. The
+prompt was substantially revised to add a `CRITICAL` instruction explicitly stating
+that informal, colloquial, or grammatically loose writing is a strong *human* signal,
+followed by five concrete human-writing examples (the cat/Mochi story, the sourdough
+starter, the victorian orphan landlord message, etc.) with explicit human-signal and
+AI-signal checklists. After this revision, the clearly human sample dropped from
+0.40 to 0.20 and confidence rose from 0.305 to 0.611.
 
 ---
 
@@ -283,6 +372,7 @@ cp .env.example .env
 
 pip install -r requirements.txt
 python app.py
+# Server runs on http://localhost:5001
 ```
 
 ### Environment variables
@@ -291,26 +381,31 @@ python app.py
 |---|---|---|
 | `GROQ_API_KEY` | Yes | API key from console.groq.com |
 
+> **macOS note:** Port 5000 is reserved by AirPlay Receiver. The server runs on
+> port 5001 by default.
+
 ---
 
 ## API Reference
 
 ### `POST /submit`
-Submit text content for attribution analysis.
+Submit text for attribution analysis.
 
 **Request body:**
 ```json
-{ "content": "Your text here (50-10,000 characters)" }
+{ "text": "Your text here (50–10,000 characters)", "creator_id": "user-123" }
 ```
 
 **Response:**
 ```json
 {
   "content_id": "uuid",
-  "timestamp": "ISO 8601",
+  "creator_id": "user-123",
+  "timestamp": "ISO 8601 UTC",
   "attribution": "Human-written | AI-generated",
+  "confidence": 0.0,
+  "label": "Full label text shown to users",
   "ai_probability": 0.0,
-  "confidence_score": 0.0,
   "transparency_label": {
     "variant": "high_confidence_human | high_confidence_ai | uncertain",
     "text": "Full label text shown to users"
@@ -332,19 +427,24 @@ Appeal a classification decision.
 
 **Request body:**
 ```json
-{ "reasoning": "Explanation of why the classification is wrong (min 20 chars)" }
+{ "creator_reasoning": "Explanation of why the classification is wrong (min 20 chars)" }
 ```
 
 **Rate limit:** 5/hr per IP.
 
+**Error codes:** 400 (missing/short reasoning), 404 (content_id not found),
+409 (appeal already pending), 429 (rate limited).
+
 ---
 
 ### `GET /log`
-Retrieve the audit log.
+Retrieve the full audit log as JSON.
 
-**Query params:** `limit` (default 50), `offset` (default 0), `event` (`classification` | `appeal`)
+**Response:** `{ "entries": [ ...classification and appeal records... ] }`
 
 ---
 
 ### `GET /status/<content_id>`
-Check the current status of a classified piece and any associated appeals.
+Check classification status and any filed appeals for a specific submission.
+
+**Response:** `{ "content_id", "current_status", "classification", "appeals" }`

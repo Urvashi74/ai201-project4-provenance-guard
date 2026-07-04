@@ -382,12 +382,12 @@ def submit():
         "timestamp": timestamp,
         "text_preview": text[:120].rstrip() + ("…" if len(text) > 120 else ""),
         "attribution": attribution,
+        "confidence_score": confidence,
         "label_variant": label_variant,
         "signals": {
             "linguistic_score": ling_score,
             "llm_score": llm_score,
             "combined_score": combined_score,
-            "confidence": confidence,
         },
         "status": "classified",
     }
